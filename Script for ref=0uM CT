@@ -1,0 +1,494 @@
+Sys.setenv(LANG="en")
+rm(list=ls())
+options(scipen=999)
+
+library(ggplot2)
+library(reshape)
+library(dplyr)
+library(cowplot)
+setwd(paste(rstudioapi::getSourceEditorContext()$path, "/../..", sep = ""))
+
+lf <- list.files("1_raw/", pattern = "plate")
+markers <- read.csv("1_raw/Markers.csv", sep=";", header = F,skipNul = TRUE)
+#change errors in encoding for first cell in "markers"
+markers$V1 <- as.character(markers$V1)
+markers[1,1] <- "KLF4"
+markers$V1 <- as.factor(markers$V1)
+markersexcluded.forfigure <- c("NKX2.1", "IRX3", "POU4F1", "TUBB3", "NANOG")
+#markerskeep: FOXG1, OTX2, POU3F1; GBX2, HOXA1, HOXB4; EN1, FOXA2, LMX1A; NES, SOX1, VIM; CMYC, ESG1, KLF4 
+
+dat <- vector()
+
+for(i in 1:3){
+  print(i)
+  tempdat <- read.csv(paste("1_raw/",lf[i], sep=""),
+                      stringsAsFactors = FALSE,
+                      na.strings = "Undetermined")
+  tempdat$Plate <- paste("Plate",i)
+  dat <- rbind(dat,tempdat)
+  rm(tempdat, i)
+}
+
+rm(lf)
+
+dat <- dat[!is.na(dat$CT),]
+dat <- dat[!dat$Target.Name %in% markersexcluded.forfigure,]
+
+dat$lvl <- paste(dat$Plate, dat$Sample.Name, dat$Target.Name)
+
+lvl <- levels(as.factor(dat$lvl))
+
+new.sd <- vector()
+
+for(j in 1:length(lvl)){
+  i <- lvl[j]
+  subdat <- dat[dat$lvl == i,]
+  subdat$Ct.SD <- round(sd(subdat$CT),3)
+  subdat$Keep <- TRUE
+  if(nrow(subdat)==3){
+    distance <- vector()
+    distance <- c(dist(subdat$CT))
+    if(sd(subdat$CT)>0.3 & sum(distance < 0.3)!=0){
+      exclude <- which(distance < 0.3)
+      if(exclude == 1){subdat$Keep[3]= FALSE}
+      if(exclude == 2){subdat$Keep[2]= FALSE}
+      if(exclude == 3){subdat$Keep[1]= FALSE}
+    }
+  }
+  new.sd <- rbind(new.sd, subdat)
+  rm(i,j, distance, exclude, subdat)
+}
+
+# temp <- merge(new.sd, dat, by=c("Sample.Name", "Target.Name", "CT"))
+# temp2 <- temp[temp$Ct.SD.x-temp$Ct.SD.y > 0.01,]
+
+
+main.1 <- new.sd[new.sd$Keep,]
+main.1$Target.Name[main.1$Target.Name =="NESTIN"] <- "NES"
+main.1$Target.Name[main.1$Target.Name =="ESG1"] <- "DPPA5"
+main.2 <- vector()
+
+for(i in lvl){
+  subdat <- main.1[main.1$lvl == i,]
+  subdat$Ct.SD <- round(sd(subdat$CT),3)
+  main.2 <- rbind(main.2, subdat)
+}
+
+main.2$HighSD <- FALSE
+main.2$HighSD[main.2$Ct.SD>0.3] <- TRUE
+main.2$CT <- as.numeric(main.2$CT)
+
+table.1 <- cast(main.2, formula = Sample.Name~Target.Name, value = "CT", mean)
+
+rownames(table.1) <- table.1$Sample
+table.1 <- table.1[,-1]
+
+delta.ct <- function(x) {
+  x - table.1$BACT
+}
+
+table.dCT <- sapply(table.1, delta.ct)
+rownames(table.dCT) <- rownames(table.1)
+table.dCT <- table.dCT[,-1]
+
+table.3 <- as.data.frame(t(table.dCT))
+
+table.3$ES_new <- as.numeric(table.3$ES_new)
+#table.3$ES <- apply(table.3[,10:11], 1, function(x) mean(x, na.rm=T))
+table.3$ES <- apply(table.3[,4:6], 1, function(x) mean(x, na.rm=T))
+
+delta.ES <- function(x){
+  x- table.3$ES
+}
+table.ddCT <- sapply(table.3, delta.ES)
+rownames(table.ddCT) <- rownames(table.3)
+
+long <- melt(table.ddCT)
+long$value <- -long$value
+
+table.1m <- as.data.frame(table.1)
+rownames(table.1m) <- rownames(table.1)
+colnames(table.1m) <- colnames(table.1)
+long.ct <- melt(t(table.1m))
+long.ct$value <- round(long.ct$value)
+long.ct <- long.ct[!long.ct$X1 %in% "BACT",]
+
+problems <- main.2[main.2$HighSD,c(1,2,10)]
+problems <- problems[!duplicated(problems),]
+problems$ID <- paste(problems$Sample.Name, problems$Target.Name)
+problems <- problems[,c(3,4)]
+
+long$ID <- paste(long$X2, long$X1)
+
+long1 <- merge(long, problems, by="ID", all.x=T)
+long1$Color <- "Fine"
+long1$Color[long1$HighSD==TRUE] <- "High SD"
+long1$Color <- as.factor(long1$Color)
+
+#long1 <- long1[!long1$X2 %in% c("ES_old","ES_new", "ES"),]
+#long.ct <- long.ct[!long.ct$X2 %in% c("ES_old","ES_new", "ES"),]
+long1 <- long1[!long1$X2 %in% c("ES_old","ES_new", "ES", "0_1", "0_2", "0_3"),]
+long.ct <- long.ct[!long.ct$X2 %in% c("ES_old","ES_new", "ES", "0_1", "0_2", "0_3"),]
+long.ct$ID <- paste(long.ct$X2, long.ct$X1)
+long.ct <- long.ct[,c(3,4)]
+long2 <- merge(long1, long.ct, by="ID")
+
+colnames(long2)[7] <- "CT"
+long2$CThigh[long2$CT>30] <- "+"
+
+#plot for all genes in one graph
+ggplot(long2, aes(X2, value.x, fill=Color))+
+  theme_classic()+
+  facet_grid(~X1)+
+  theme(axis.text.x=element_text(angle = 90, vjust = 0.5),
+  strip.text = element_text(face = "italic"))+
+  geom_col()+
+  geom_text(data = long2, aes(x=X2, y=15,label=CThigh), size=3)+
+  scale_fill_manual(values=c("darkblue","red"))+
+  xlab("")+
+  ylab("Fold difference (log2)")+
+  ggtitle("", subtitle = "+: CT > 30")
+  
+ggsave("2_Graphs/QC.png", width = 50, height = 15, units = "cm")
+
+#?
+data.plot <- long1[,2:4]
+colnames(data.plot) <- c("Marker","Sample","ddCT")
+data.plot$FC <- 2^data.plot$ddCT
+data.plot$Concentration <- strsplit(as.character(paste(data.plot$Sample)), "_")
+data.plot$Concentration <- sapply(data.plot$Concentration, function(x) x[1])
+data.plot$Concentration <- sub(",", ".", data.plot$Concentration)
+data.plot.2 <- merge(data.plot, markers, by.x = "Marker", by.y="V1")
+
+
+marker.levels <- levels(data.plot.2$Marker)
+
+#i <- "OTX2"
+data.plot.3 <- vector()
+
+for(i in marker.levels){
+  subdat <- data.plot.2[data.plot.2$Marker==i,]
+  
+  #Testing against hES
+  #hES0 <- t.test(subdat$ddCT[subdat$Concentration=="0"], mu = 0)
+  #hES0.5 <- t.test(subdat$ddCT[subdat$Concentration=="0.5"], mu = 0)
+  #hES2 <- t.test(subdat$ddCT[subdat$Concentration=="2"], mu = 0)
+  #subdat$p.value.hES[subdat$Concentration=="0"] <- hES0$p.value
+  #subdat$p.value.hES[subdat$Concentration=="0.5"] <- hES0.5$p.value
+  #subdat$p.value.hES[subdat$Concentration=="2"] <- hES2$p.value
+
+  #Testing against concentration 0
+  #dd0.5 <- t.test(subdat$ddCT[subdat$Concentration=="0"], subdat$ddCT[subdat$Concentration=="0.5"], var.equal = T)
+  #dd2 <- t.test(subdat$ddCT[subdat$Concentration=="0"], subdat$ddCT[subdat$Concentration=="2"], var.equal = T)
+  dd0.5 <- t.test(mu = 0, subdat$ddCT[subdat$Concentration=="0.5"], var.equal = T)
+  dd2 <- t.test(mu = 0, subdat$ddCT[subdat$Concentration=="2"], var.equal = T)
+  subdat$p.value.0[subdat$Concentration=="0.5"] <- dd0.5$p.value
+  subdat$p.value.0[subdat$Concentration=="2"] <- dd2$p.value
+  
+  #Adding ylevel
+  subdat$y.level <- max(subdat$FC)
+  #subdat$y.level <- max(subdat$FC)^1.16
+  
+  data.plot.3 <- rbind(data.plot.3, subdat)
+}
+
+
+#data.plot.3$hES.sign[data.plot.3$p.value.hES<0.05] <- "#"
+#data.plot.3$hES.sign[data.plot.3$p.value.hES<0.01] <- "##"
+#data.plot.3$hES.sign[data.plot.3$p.value.hES<0.001] <- "###"
+
+data.plot.3$sign.0[data.plot.3$p.value.0<0.05] <- "*"
+data.plot.3$sign.0[data.plot.3$p.value.0<0.01] <- "**"
+data.plot.3$sign.0[data.plot.3$p.value.0<0.001] <- "***"
+
+
+clr <- c("blue","purple","green","yellow","red")
+data.plot.3$y.levelAll[data.plot.3$V2 %in% c("Neuroectoderm", "Pluripotency")] <- max(data.plot.3$y.level[data.plot.3$V2 %in% c("Neuroectoderm", "Pluripotency")])
+data.plot.3$y.levelAll[!data.plot.3$V2 %in% c("Neuroectoderm", "Pluripotency")] <- max(data.plot.3$y.level[!data.plot.3$V2 %in% c("Neuroectoderm", "Pluripotency")])
+
+#divide data into panel A and be for for loop
+data.plot.3$panel[data.plot.3$V2 %in% c("Neuroectoderm", "Pluripotency")] <- "1"
+data.plot.3$panel[!data.plot.3$V2 %in% c("Neuroectoderm", "Pluripotency")] <- "2"
+
+#rearrange markers
+data.plot.3$Marker <- factor(data.plot.3$Marker, levels=levels(data.plot.3$Marker)[c(1,2,9,11,14:15,5,12:13,3:4,10,6:8)])
+
+#rearrange Markergroups
+data.plot.3$V2 <- factor(data.plot.3$V2, levels=levels(factor(data.plot.3$V2))[c(4,5,1,3,2)])
+
+
+
+#each Marker group separately----
+i <- 1
+#clr <- c("red","yellow","blue","green","purple")
+clr <- c("blue","purple","green","red","yellow")
+
+#split markers into brain areas and pluripot/NSC
+#Fig3A-B, pluripotency, NSC
+for(i in 1:length(levels(factor(markers$V2)))){
+  if(levels(factor(markers$V2))[i] %in% c("Neuroectoderm", "Pluripotency")){
+    ylimitsman <- c(0.002, 10)
+    y.levelAllManual <- 10 *0.8}
+  if(!levels(factor(markers$V2))[i] %in% c("Neuroectoderm", "Pluripotency")){
+    ylimitsman <- c(0.0002, 40)
+    y.levelAllManual <- 40*0.8}
+  
+  ggplot(data.plot.3[data.plot.3$V2==levels(factor(markers$V2))[i],], aes(Concentration, FC))+
+    theme_classic(base_size=30)+
+    facet_grid(~Marker)+
+    stat_summary(fun.y=mean, geom="bar", position=position_dodge(0.95), col="black", fill=clr[i]) +
+    stat_summary(fun.data="mean_se", geom="errorbar", width=0.2, position=position_dodge(0.95))+
+    #geom_errorbar(aes(ymin = area-sd, ymax = area+sd), width=0.2)+
+   # scale_y_continuous(trans='log10', limits = c(ylimitsman))+
+    scale_y_continuous(trans='log10', limits = c(ylimitsman))+
+    #geom_text(aes(x=Concentration, y=max(y.level), label=hES.sign), size=4, na.rm = TRUE)+
+    #geom_text(aes(x=Concentration, y=max(y.level)*0.5, label=sign.0), size=6, na.rm = TRUE)+
+    #geom_text(aes(x=Concentration, y=y.levelAll, label=hES.sign), size=8, na.rm = TRUE)+
+    geom_text(aes(x=Concentration, y=y.levelAllManual, label=sign.0), size=12, na.rm = TRUE)+
+    labs(x = "Concentration [µM]", y = "Fold Change") +
+    theme(
+      #element_line(size = 1.0),
+      #axis.title.x = element_text(colour="grey20",face="bold"),
+      #axis.title.y = element_text(colour="grey20",face="bold"),
+      plot.subtitle = element_text(colour="black",face="italic", size = 15),
+      axis.text.x = element_text(colour="black",face="bold", hjust=0.5),
+      axis.text.y = element_text(colour="black",face="bold"),
+      strip.text = element_text(face = "italic")
+      #text = element_text(size=50)
+    )
+    #ggtitle("", subtitle = "#: Comparison with hES;    *: Comparison with Concentration 0 µM")
+  
+  ggsave(paste("2_Graphs/Ref0uM/single_", levels(factor(markers$V2))[i], ".png", sep=""), 
+         height = 18, width = 16, unit="cm")
+}  
+
+
+#----Panel 1, alone----
+i <- 1
+ylimitsman <- c(0.002, 10)
+clr <- c("red","yellow")
+breaks <- c(0.01,0.1, 1, 10, 1000)
+
+  
+plot.data.1 <- ggplot(data.plot.3[data.plot.3$panel==levels(factor(data.plot.3$panel))[i],], aes(Concentration, FC, fill = V2))+
+  theme_classic(base_size=30)+
+  facet_grid(~Marker)+
+  stat_summary(fun.y=mean, geom="bar", position=position_dodge(0.95), col="black", size = .8) +
+  stat_summary(fun.data="mean_se", geom="errorbar", width=0.2, position=position_dodge(0.95), size = 1.0)+
+  scale_y_continuous(trans='log10', limits = c(ylimitsman), breaks = c(breaks))+
+  #geom_text(aes(x=Concentration, y=y.levelAll, label=hES.sign), size=8, na.rm = TRUE)+
+  geom_text(aes(x=Concentration, y=ylimitsman[2]*0.8, label=sign.0), size=15, na.rm = TRUE)+
+  labs(x = "Concentration [µM]", y = "Fold Change", fill = "Marker") +
+  theme(
+    #element_line(size = 1.0),
+    plot.subtitle = element_text(colour="black",face="italic", size = 15),
+    axis.line = element_line(size = 2),
+    axis.ticks = element_line(size = 2),
+    axis.text.x = element_text(colour="black",face="bold", hjust=0.5, size = 25),
+    axis.text.y = element_text(colour="black",face="bold", size = 25),
+    #legend.title = element_text(colour="black", size = 25),
+    legend.title = element_blank(),
+    strip.background = element_rect(size=2, linetype="blank", colour ="red"),
+    strip.text = element_text(face= "italic")
+    #legend.position = c(0.5, 0.8)
+    )+
+  scale_fill_manual(values=c(clr))
+  #ggtitle("", subtitle = "*: Comparison with Concentration 0 µM")
+    
+plot.data.1
+  
+i <- as.numeric(i)
+ggsave("2_Graphs/Ref0uM/alone_panel1.png", 
+         height = 18, width = 2*17, unit="cm")
+
+
+
+#----Panel2 alone----
+#Panel 2, alone
+i <- 2
+ylimitsman <- c(0.0002, 40)
+clr <- c("blue","green","purple")
+breaks <- c(0.001, 0.01, 0.1, 1, 10)
+  
+plot.data.2 <- ggplot(data.plot.3[data.plot.3$panel==levels(factor(data.plot.3$panel))[i],], aes(Concentration, FC, fill = V2))+
+  theme_classic(base_size=30)+
+  facet_grid(~Marker)+
+  stat_summary(fun.y=mean, geom="bar", position=position_dodge(0.95), col="black", size = .8) +
+  stat_summary(fun.data="mean_se", geom="errorbar", width=0.2, position=position_dodge(0.95), size = 1.0)+
+  scale_y_continuous(trans='log10', limits = c(ylimitsman), breaks = c(breaks))+
+  #geom_text(aes(x=Concentration, y=y.levelAll, label=hES.sign), size=8, na.rm = TRUE)+
+  geom_text(aes(x=Concentration, y=ylimitsman[2] *0.8, label=sign.0), size=15, na.rm = TRUE)+
+  labs(x = "Concentration [µM]", y = "Fold Change", fill = "Marker") +
+  theme(
+    #element_line(size = 1.0),
+    plot.subtitle = element_text(colour="black",face="italic", size = 15),
+    axis.line = element_line(size = 2),
+    axis.ticks = element_line(size = 2),
+    axis.text.x = element_text(colour="black",face="bold", hjust=0.5, size = 25),
+    axis.text.y = element_text(colour="black",face="bold", size = 25),
+    #legend.title = element_text(colour="black", size = 25),
+    legend.title = element_blank(),
+    strip.background = element_rect(size=2, linetype="blank", colour ="red"),
+    strip.text = element_text(face= "italic")
+    #legend.position = c(0.5, 0.8)
+  )+
+  scale_fill_manual(values=c(clr))
+  #ggtitle("", subtitle = "*: Comparison with Concentration 0 µM")
+plot.data.2
+  
+i <- as.numeric(i)
+ggsave("2_Graphs/Ref0uM/alone_panel2.png", 
+         height = 18, width = 3*17, unit="cm")
+
+
+
+##only panel 2, not logarithmic----
+#-> linear, whole graph
+i <- 2
+ylimitsman <- c(0.0002, 40)
+clr <- c("blue","green","purple")
+breaks <- c(0.001, 0.01, 0.1, 1, 10)
+
+plot.data.2 <- ggplot(data.plot.3[data.plot.3$panel==levels(factor(data.plot.3$panel))[i],], aes(Concentration, FC, fill = V2))+
+  theme_classic(base_size=30)+
+  facet_grid(~Marker)+
+  stat_summary(fun.y=mean, geom="bar", position=position_dodge(0.95), col="black", size = .8) +
+  stat_summary(fun.data="mean_se", geom="errorbar", width=0.2, position=position_dodge(0.95), size = 1.0)+
+  #scale_y_continuous(limits = c(ylimitsman))+
+  #geom_text(aes(x=Concentration, y=y.levelAll, label=hES.sign), size=8, na.rm = TRUE)+
+  labs(x = "Concentration [µM]", y = "Fold Change", fill = "Marker") +
+  theme(
+    #element_line(size = 1.0),
+    plot.subtitle = element_text(colour="black",face="italic", size = 15),
+    axis.line = element_line(size = 2),
+    axis.ticks = element_line(size = 2),
+    axis.text.x = element_text(colour="black",face="bold", hjust=0.5, size = 25),
+    axis.text.y = element_text(colour="black",face="bold", size = 25),
+    #legend.title = element_text(colour="black", size = 25),
+    legend.title = element_blank(),
+    strip.background = element_rect(size=2, linetype="blank", colour ="red"),
+    strip.text = element_text(face= "italic")
+    #legend.position = c(0.5, 0.8)
+  )+
+  scale_fill_manual(values=c(clr))+
+  geom_text(aes(x=Concentration, y=y.levelAll*0.88, label=sign.0), size=15, na.rm = TRUE)
+#ggtitle("", subtitle = "*: Comparison with Concentration 0 µM")
+plot.data.2
+
+i <- as.numeric(i)
+ggsave("2_Graphs/Ref0uM/alone_panel2_linear_all.png", 
+       height = 18, width = 3*16, unit="cm")
+
+
+
+##----only panel 2, not logarithmic -> linear----
+#, zoomed graph
+i <- 2
+ylimitsman <- c(0.0002, 40)
+clr <- c("blue","green","purple")
+breaks <- c(0.001, 0.01, 0.1, 1, 10)
+
+plot.data.2 <- ggplot(data.plot.3[data.plot.3$panel==levels(factor(data.plot.3$panel))[i],], aes(Concentration, FC, fill = V2))+
+  theme_classic(base_size=30)+
+  facet_grid(~Marker)+
+  stat_summary(fun.y=mean, geom="bar", position=position_dodge(0.95), col="black", size = .8) +
+  stat_summary(fun.data="mean_se", geom="errorbar", width=0.2, position=position_dodge(0.95), size = 1.0)+
+  #scale_y_continuous(limits = c(ylimitsman))+
+  #geom_text(aes(x=Concentration, y=y.levelAll, label=hES.sign), size=8, na.rm = TRUE)+
+  geom_text(aes(x=Concentration, y=ylimitsman[2] *0.8, label=sign.0), size=15, na.rm = TRUE)+
+  labs(x = "Concentration [µM]", y = "Fold Change", fill = "Marker") +
+  theme(
+    #element_line(size = 1.0),
+    plot.subtitle = element_text(colour="black",face="italic", size = 15),
+    axis.line = element_line(size = 2),
+    axis.ticks = element_line(size = 2),
+    axis.text.x = element_text(colour="black",face="bold", hjust=0.5, size = 25),
+    axis.text.y = element_text(colour="black",face="bold", size = 25),
+    #legend.title = element_text(colour="black", size = 25),
+    legend.title = element_blank(),
+    strip.background = element_rect(size=2, linetype="blank", colour ="red"),
+    strip.text = element_text(face= "italic")
+    #legend.position = c(0.5, 0.8)
+  )+
+  scale_fill_manual(values=c(clr))
+#ggtitle("", subtitle = "*: Comparison with Concentration 0 µM,  2µM GBX2 = 16x, HOXB4 = 10x")
+plot.data.2
+
+i <- as.numeric(i)
+ggsave("2_Graphs/Ref0uM/alone_panel2_linear_zoomed.png", 
+       height = 18, width = 3*16, unit="cm")
+
+
+
+  
+##combine both panels----
+#add empty rows to match cowplot
+nNewRows <- 3
+rempty=matrix(c(rep(NA, ncol(data.plot.3))),nrow=nNewRows*length(levels(factor(data.plot.3$Concentration))),ncol=ncol(data.plot.3))
+rempty=as.data.frame(matrix(c(rep(NA, ncol(data.plot.3))),nrow=nNewRows*length(levels(factor(data.plot.3$Concentration))),ncol=ncol(data.plot.3)))
+rempty[,11] <- "1"
+rempty[,5]<- levels(factor(data.plot.3$Concentration))
+rempty[,1]<- c(paste("NA-",1:nNewRows, sep = ""))
+colnames(rempty) <- colnames(data.plot.3)
+data.plot.3 <- rbind(data.plot.3, rempty)
+
+i <- 1
+#split markers into brain areas and pluripot/NSC
+#all five plots
+for(i in 1:length(levels(factor(data.plot.3$panel)))){
+  if(levels(factor(data.plot.3$panel))[i] == "1"){
+    ylimitsman <- c(0.002, 10)
+    clr <- c("red","yellow")
+    breaks <- c(0.01,0.1, 1, 10, 1000)
+    }
+  if(levels(factor(data.plot.3$panel))[i] == "2"){
+    ylimitsman <- c(0.0002, 40)
+    clr <- c("blue","green","purple")
+    breaks <- c(0.001, 0.01, 0.1, 1, 10)
+    }
+
+
+  plot.data <- ggplot(data.plot.3[data.plot.3$panel==levels(factor(data.plot.3$panel))[i],], aes(Concentration, FC, fill = V2))+
+    theme_classic(base_size=30)+
+    facet_grid(~Marker)+
+    stat_summary(fun.y=mean, geom="bar", position=position_dodge(0.95), col="black", size = .8) +
+    stat_summary(fun.data="mean_se", geom="errorbar", width=0.2, position=position_dodge(0.95), size = 1.0)+
+    scale_y_continuous(trans='log10', limits = c(ylimitsman), breaks = c(breaks))+
+    #geom_text(aes(x=Concentration, y=y.levelAll, label=hES.sign), size=8, na.rm = TRUE)+
+    geom_text(aes(x=Concentration, y=ylimitsman[2] *0.8, label=sign.0), size=15, na.rm = TRUE)+
+    labs(x = "Concentration [µM]", y = "Fold Change", fill = "Marker") +
+    theme(
+      #element_line(size = 1.0),
+      plot.subtitle = element_text(colour="black",face="italic", size = 15),
+      axis.line = element_line(size = 2),
+      axis.ticks = element_line(size = 2),
+      axis.text.x = element_text(colour="black",face="bold", hjust=0.5, size = 25),
+      axis.text.y = element_text(colour="black",face="bold", size = 25),
+      #legend.title = element_text(colour="black", size = 25),
+      legend.title = element_blank(),
+      strip.background = element_rect(size=2, linetype="blank", colour ="red"),
+      strip.text = element_text(face= "italic")
+      #legend.position = c(0.5, 0.8)
+    )+
+    scale_fill_manual(values=c(clr))
+  #ggtitle("", subtitle = "*: Comparison with Concentration 0 µM")
+  
+  plot.data
+  i <- as.numeric(i)
+  ggsave(paste("2_Graphs/Ref0uM/combined_panel", levels(factor(data.plot.3$panel))[i], ".png", sep=""), 
+         height = 18, width = (length(levels(factor(data.plot.3$Marker[data.plot.3$panel==i])))/3+1)*16, unit="cm")
+  
+  assign(paste("plot.", levels(factor(data.plot.3$panel))[i], sep = ""), plot.data)
+  
+}  
+
+#combined panel
+#plot_grid(plot.Pluripotency, plot.Neuroectoderm, labels = c('A', 'B'))
+plot_grid(plot.1, plot.2, ncol = 1, align = 'v')+
+  
+  ggsave("2_Graphs/Ref0uM/combined_panel_cow.png", 
+         height = 37, width = (length(levels(factor(data.plot.3$Marker[data.plot.3$panel==i])))/3+1)*16, unit="cm")
+
+
+
+
